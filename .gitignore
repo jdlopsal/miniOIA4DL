@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+env/
+
+# Dataset (¡importante!)
+data/cifar-100-python/
+data/__pycache__/
+
+# Cython
+cython_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp

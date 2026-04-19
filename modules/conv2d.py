@@ -15,6 +15,14 @@ class Conv2D(Layer):
         # MODIFICAR: Añadir nuevo if-else para otros algoritmos de convolución
         if conv_algo == 0:
             self.mode = 'direct' 
+        elif conv_algo == 1:
+            self.mode = 'im2col'
+        elif conv_algo == 2:
+            self.mode = 'im2col_fused'
+        elif conv_algo == 3:
+            self.mode = 'direct_reorder'   
+        elif conv_algo == 4:
+            self.mode = 'direct_vectorized'         
         else:
             print(f"Algoritmo {conv_algo} no soportado aún")
             self.mode = 'direct' 
@@ -60,8 +68,16 @@ class Conv2D(Layer):
         # PISTA: Usar estos if-else si implementas más algoritmos de convolución
         if self.mode == 'direct':
             return self._forward_direct(input)
+        elif self.mode == 'im2col':
+            return self._forward_im2col(input)
+        elif self.mode == 'im2col_fused':
+            return self._forward_im2col_fused(input)
+        elif self.mode == 'direct_reorder':
+            return self._forward_direct_reorder(input)
+        elif self.mode == 'direct_vectorized':
+            return self._forward_direct_vectorized(input)
         else:
-            raise ValueError("Mode must be 'direct")
+            raise ValueError("Mode must be 'direct or im2col")
 
     def backward(self, grad_output, learning_rate):
         # ESTO NO ES NECESARIO YA QUE NO VAIS A HACER BACKPROPAGATION
@@ -137,3 +153,105 @@ class Conv2D(Layer):
         return grad_input
 
     # PISTA: Se te ocurren otros algoritmos de convolución?
+   # ---  DIRECT IMPLEMENTATION REORDENADO---
+    
+    def _forward_direct_reorder(self, input):
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+
+        if self.padding > 0:
+            input = np.pad(input,
+                           ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)),
+                           mode='constant').astype(np.float32)
+
+        out_h = (input.shape[2] - k_h) // self.stride + 1
+        out_w = (input.shape[3] - k_w) // self.stride + 1
+        output = np.zeros((batch_size, self.out_channels, out_h, out_w), dtype=np.float32)
+
+        for b in range(batch_size):
+            for out_c in range(self.out_channels):
+                for in_c in range(self.in_channels):
+    # se intercambian los bucles i,j
+                    for ki in range(k_h):
+                        for kj in range(k_w):
+                            for i in range(out_h):
+                                for j in range(out_w):
+                                    output[b, out_c, i, j] += (
+                                        self.kernels[out_c, in_c, ki, kj] *
+                                        input[b, in_c, i * self.stride+ki, j * self.stride+kj] )
+                output[b, out_c] += self.biases[out_c]             
+        return output
+    
+    # Direct implementado vectorizado
+    def _forward_direct_vectorized(self, input):
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+
+        if self.padding > 0:
+            input = np.pad(input,
+                           ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)),
+                           mode='constant').astype(np.float32)
+
+        out_h = (input.shape[2] - k_h) // self.stride + 1
+        out_w = (input.shape[3] - k_w) // self.stride + 1
+        output = np.zeros((batch_size, self.out_channels, out_h, out_w), dtype=np.float32)
+
+        for b in range(batch_size):
+            for out_c in range(self.out_channels):
+                        for in_c in range(self.in_channels):
+                            for ki in range(k_h):
+                                for kj in range(k_w):
+                                    output[b, out_c] += self.kernels[out_c, in_c, ki, kj] *input [b, in_c, ki:ki+out_h * self.stride:self.stride,
+                                    kj:kj+out_w * self.stride:self.stride]
+                        output[b, out_c] += self.biases[out_c]            
+         
+        return output
+    #  implementacion con im2col +gem
+
+    def _forward_im2col(self, input):
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+
+        if self.padding > 0:
+            input = np.pad(input,
+                       ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)),
+                       mode='constant').astype(np.float32)
+        out_h = (input.shape[2] - k_h) // self.stride + 1
+        out_w = (input.shape[3] - k_w) // self.stride + 1
+    # im2col: cada parche se convierte en una columna (pp.14 de Convoluciones 1er metodo)
+        cols = []
+        for i in range(out_h):
+            for j in range(out_w):
+                patch = input[:, :, i*self.stride:i*self.stride+k_h, j*self.stride:j*self.stride+k_w]
+                cols.append(patch.reshape(batch_size, -1))
+        cols = np.array(cols).transpose(1, 2, 0)  #( np.array(cols).T)
+    # GEMM (pp.14 de Convoluciones 2do metodo)
+        kernels = self.kernels.reshape(self.out_channels, -1)
+    # Bias en capa de Conv2D
+        output = (kernels @ cols) + self.biases.reshape(-1, 1)
+ 
+        return output.reshape(batch_size, self.out_channels, out_h, out_w)
+ 
+    # Implementacion de im2col_fused
+    def _forward_im2col_fused(self, input):
+        batch_size, _, in_h, in_w = input.shape
+        k_h, k_w = self.kernel_size, self.kernel_size
+ 
+        if self.padding > 0:
+            input = np.pad(input,
+                           ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)),
+                           mode='constant').astype(np.float32)
+ 
+        out_h = (input.shape[2] - k_h)  // self.stride + 1
+        out_w = (input.shape[3] - k_w) // self.stride + 1
+        
+        kernels = self.kernels.reshape(self.out_channels, -1)
+        output = np.zeros((batch_size, self.out_channels, out_h, out_w), dtype=np.float32)
+        
+        for i in range(out_h):
+            for j in range(out_w):
+                patch = input[:, :, i*self.stride:i*self.stride+k_h, j*self.stride:j*self.stride+k_w]
+                patch_flat = patch.reshape(batch_size, -1)
+                output[:, :, i, j] = (kernels @ patch_flat.T).T
+        output += self.biases.reshape(1, -1, 1, 1)       
+        return output
